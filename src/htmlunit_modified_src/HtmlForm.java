@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2002-2010 Gargoyle Software Inc.
+ * Copyright (c) 2002-2011 Gargoyle Software Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,6 +22,7 @@ import java.util.Arrays;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Pattern;
 
 import org.apache.commons.lang.StringUtils;
 import org.apache.http.client.utils.URLEncodedUtils;
@@ -34,7 +35,6 @@ import com.gargoylesoftware.htmlunit.HttpMethod;
 import com.gargoylesoftware.htmlunit.Page;
 import com.gargoylesoftware.htmlunit.ScriptResult;
 import com.gargoylesoftware.htmlunit.SgmlPage;
-import com.gargoylesoftware.htmlunit.TextUtil;
 import com.gargoylesoftware.htmlunit.WebAssert;
 import com.gargoylesoftware.htmlunit.WebClient;
 import com.gargoylesoftware.htmlunit.WebRequest;
@@ -42,11 +42,12 @@ import com.gargoylesoftware.htmlunit.WebWindow;
 import com.gargoylesoftware.htmlunit.javascript.host.Event;
 import com.gargoylesoftware.htmlunit.protocol.javascript.JavaScriptURLConnection;
 import com.gargoylesoftware.htmlunit.util.NameValuePair;
+import com.gargoylesoftware.htmlunit.util.UrlUtils;
 
 /**
  * Wrapper for the HTML element "form".
  *
- * @version $Revision: 5942 $
+ * @version $Revision: 6335 $
  * @author <a href="mailto:mbowler@GargoyleSoftware.com">Mike Bowler</a>
  * @author David K. Taylor
  * @author Brad Clarke
@@ -56,16 +57,17 @@ import com.gargoylesoftware.htmlunit.util.NameValuePair;
  * @author Kent Tong
  * @author Ahmed Ashour
  * @author Philip Graf
+ * @author Ronald Brill
  */
 public class HtmlForm extends HtmlElement {
-
-    private static final long serialVersionUID = 5338964478788825866L;
 
     /** The HTML tag represented by this element. */
     public static final String TAG_NAME = "form";
 
     private static final Collection<String> SUBMITTABLE_ELEMENT_NAMES =
         Arrays.asList(new String[]{"input", "button", "select", "textarea", "isindex"});
+
+    private static final Pattern SUBMIT_CHARSET_PATTERN = Pattern.compile("[ ,].*");
 
     private final List<HtmlElement> lostChildren_ = new ArrayList<HtmlElement>();
 
@@ -107,8 +109,9 @@ public class HtmlForm extends HtmlElement {
                 isPreventDefault_ = false;
                 final ScriptResult scriptResult = fireEvent(Event.TYPE_SUBMIT);
                 if (isPreventDefault_) {
+                    //return scriptResult.getNewPage();
                     if (scriptResult != null){
-                        return scriptResult.getNewPage();
+                         return scriptResult.getNewPage();
                     }
                     else{
                         return htmlPage;
@@ -116,23 +119,26 @@ public class HtmlForm extends HtmlElement {
                 }
             }
 
-            final String action = getActionAttribute();
-            if (TextUtil.startsWithIgnoreCase(action, JavaScriptURLConnection.JAVASCRIPT_PREFIX)) {
+            final String action = getActionAttribute().trim();
+            if (StringUtils.startsWithIgnoreCase(action, JavaScriptURLConnection.JAVASCRIPT_PREFIX)) {
                 return htmlPage.executeJavaScriptIfPossible(action, "Form action", getStartLineNumber()).getNewPage();
             }
         }
         else {
-            if (TextUtil.startsWithIgnoreCase(getActionAttribute(), JavaScriptURLConnection.JAVASCRIPT_PREFIX)) {
+            if (StringUtils.startsWithIgnoreCase(getActionAttribute(), JavaScriptURLConnection.JAVASCRIPT_PREFIX)) {
                 // The action is JavaScript but JavaScript isn't enabled.
                 // Return the current page.
                 return htmlPage;
             }
         }
+
         final WebRequest request = getWebRequest(submitElement);
         final String target = htmlPage.getResolvedTarget(getTargetAttribute());
 
         final WebWindow webWindow = htmlPage.getEnclosingWindow();
-        webClient.download(webWindow, target, request, "JS form.submit()");
+        final String action = getActionAttribute();
+        final boolean isHashJump = HttpMethod.GET.equals(request.getHttpMethod()) && action.endsWith("#");
+        webClient.download(webWindow, target, request, isHashJump, "JS form.submit()");
         return htmlPage;
     }
 
@@ -165,12 +171,13 @@ public class HtmlForm extends HtmlElement {
             method = HttpMethod.POST;
         }
         else {
-            if (!"get".equalsIgnoreCase(methodAttribute) && methodAttribute.trim().length() > 0) {
+            if (!"get".equalsIgnoreCase(methodAttribute) && StringUtils.isNotBlank(methodAttribute)) {
                 notifyIncorrectness("Incorrect submit method >" + getMethodAttribute() + "<. Using >GET<.");
             }
             method = HttpMethod.GET;
         }
 
+        final BrowserVersion browser = getPage().getWebClient().getBrowserVersion();
         String actionUrl = getActionAttribute();
         if (HttpMethod.GET == method) {
             final String anchor = StringUtils.substringAfter(actionUrl, "#");
@@ -181,25 +188,32 @@ public class HtmlForm extends HtmlElement {
             // action may already contain some query parameters: they have to be removed
             actionUrl = StringUtils.substringBefore(actionUrl, "#");
             actionUrl = StringUtils.substringBefore(actionUrl, "?");
-            final BrowserVersion browser = getPage().getWebClient().getBrowserVersion();
             if (browser.hasFeature(BrowserVersionFeatures.FORM_SUBMISSION_URL_END_WITH_QUESTIONMARK)
                     || queryFromFields.length() > 0) {
                 actionUrl += "?" + queryFromFields;
             }
-            if (anchor.length() > 0) {
+            if (anchor.length() > 0
+                    && !browser.hasFeature(BrowserVersionFeatures.FORM_SUBMISSION_URL_WITHOUT_HASH)) {
                 actionUrl += "#" + anchor;
             }
             parameters.clear(); // parameters have been added to query
         }
-        final URL url;
+        URL url;
         try {
             if (actionUrl.length() == 0) {
                 url = htmlPage.getWebResponse().getWebRequest().getUrl();
+                if (browser.hasFeature(BrowserVersionFeatures.FORM_SUBMISSION_URL_WITHOUT_HASH)) {
+                    url = UrlUtils.getUrlWithNewRef(url, null);
+                }
             }
             else if (actionUrl.startsWith("?")) {
                 String urlString = htmlPage.getWebResponse().getWebRequest().getUrl().toExternalForm();
                 if (urlString.indexOf('?') != -1) {
                     urlString = urlString.substring(0, urlString.indexOf('?'));
+                }
+                else if (urlString.indexOf('#') != -1
+                        && browser.hasFeature(BrowserVersionFeatures.FORM_SUBMISSION_URL_WITHOUT_HASH)) {
+                    urlString = urlString.substring(0, urlString.indexOf('#'));
                 }
                 url = new URL(urlString + actionUrl);
             }
@@ -230,7 +244,7 @@ public class HtmlForm extends HtmlElement {
      */
     private String getSubmitCharset() {
         if (getAcceptCharsetAttribute().length() > 0) {
-            return getAcceptCharsetAttribute().trim().replaceAll("[ ,].*", "");
+            return SUBMIT_CHARSET_PATTERN.matcher(getAcceptCharsetAttribute().trim()).replaceAll("");
         }
         return getPage().getPageEncoding();
     }
@@ -320,21 +334,21 @@ public class HtmlForm extends HtmlElement {
             return true;
         }
 
-        if (!tagName.equals("isindex") && !element.hasAttribute("name")) {
+        if (!"isindex".equals(tagName) && !element.hasAttribute("name")) {
             return false;
         }
 
-        if (!tagName.equals("isindex") && element.getAttribute("name").equals("")) {
+        if (!"isindex".equals(tagName) && "".equals(element.getAttribute("name"))) {
             return false;
         }
 
         if (element instanceof HtmlInput) {
             final String type = element.getAttribute("type").toLowerCase();
-            if (type.equals("radio") || type.equals("checkbox")) {
+            if ("radio".equals(type) || "checkbox".equals(type)) {
                 return element.hasAttribute("checked");
             }
         }
-        if (tagName.equals("select")) {
+        if ("select".equals(tagName)) {
             return ((HtmlSelect) element).isValidForSubmission();
         }
         return true;
@@ -362,11 +376,11 @@ public class HtmlForm extends HtmlElement {
         if (element instanceof HtmlInput) {
             final HtmlInput input = (HtmlInput) element;
             final String type = input.getTypeAttribute().toLowerCase();
-            if (type.equals("submit") || type.equals("image") || type.equals("reset") || type.equals("button")) {
+            if ("submit".equals(type) || "image".equals(type) || "reset".equals(type) || "button".equals(type)) {
                 return false;
             }
         }
-        if (tagName.equals("button")) {
+        if ("button".equals(tagName)) {
             return false;
         }
 
