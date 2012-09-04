@@ -6,6 +6,7 @@ if RUBY_PLATFORM != "java"
 else
   require 'akephalos/htmlunit'
   require 'akephalos/htmlunit/ext/http_method'
+  require 'akephalos/htmlunit/ext/confirm_handler'
 
   require 'akephalos/page'
   require 'akephalos/node'
@@ -29,10 +30,18 @@ else
       # @return [true/false] whether to raise errors on javascript failures
       attr_reader :validate_scripts
 
+      # @return [true/false] whether to ignore insecure ssl certificates
+      attr_reader :use_insecure_ssl
+
+      # @return ["trace" / "debug" / "info" / "warn" / "error" or "fatal"] which points the htmlunit log level
+      attr_reader :htmlunit_log_level
+
       # The default configuration options for a new Client.
       DEFAULT_OPTIONS = {
         :browser => :firefox_3_6,
-        :validate_scripts => true
+        :validate_scripts => true,
+        :use_insecure_ssl => false,
+        :htmlunit_log_level => 'fatal'
       }
 
       # Map of browser version symbols to their HtmlUnit::BrowserVersion
@@ -58,11 +67,13 @@ else
         @_client = java.util.concurrent.FutureTask.new do
           client = HtmlUnit::WebClient.new(browser_version)
 
-          Filter.new(client)
           client.setThrowExceptionOnFailingStatusCode(false)
           client.setAjaxController(HtmlUnit::NicelyResynchronizingAjaxController.new)
           client.setCssErrorHandler(HtmlUnit::SilentCssErrorHandler.new)
           client.setThrowExceptionOnScriptError(validate_scripts)
+          client.setUseInsecureSSL(use_insecure_ssl)
+
+          Filter.new(client)
           client
         end
         Thread.new { @_client.run }
@@ -124,9 +135,14 @@ else
         !!validate_scripts
       end
 
+      # @return [true, false] whether to ignore insecure ssl certificates
+      def use_insecure_ssl?
+        !!use_insecure_ssl
+      end
+
       # Merges the DEFAULT_OPTIONS with those provided to initialize the Client
-      # state, namely, its browser version and whether it should
-      # validate scripts.
+      # state, namely, its browser version, whether it should
+      # validate scripts, and htmlunit log level.
       #
       # @param [Hash] options the options to process
       def process_options!(options)
@@ -134,6 +150,19 @@ else
 
         @browser_version  = BROWSER_VERSIONS.fetch(options.delete(:browser))
         @validate_scripts = options.delete(:validate_scripts)
+        @use_insecure_ssl = options.delete(:use_insecure_ssl)
+        @htmlunit_log_level = options.delete(:htmlunit_log_level)
+
+        java.lang.System.setProperty("org.apache.commons.logging.simplelog.defaultlog", @htmlunit_log_level)
+      end
+
+      # Confirm or cancel the dialog, returning the text of the dialog
+      def confirm_dialog(confirm = true, &block)
+        handler = HtmlUnit::ConfirmHandler.new
+        handler.handleConfirmValue = confirm
+        client.setConfirmHandler(handler)
+        yield if block_given?
+        return handler.text
       end
 
       private
